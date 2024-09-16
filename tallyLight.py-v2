@@ -1,0 +1,381 @@
+import network
+import socket
+import time
+from machine import Pin, unique_id
+import ubinascii
+import ujson
+import esp
+import gc
+import sys
+
+# Desativa as mensagens de debug do ESP
+esp.osdebug(None)
+gc.collect()
+
+# Configura os pinos (ESP12/NodeMCU)
+ledSignal = Pin(15, Pin.OUT)
+ledRed = Pin(12, Pin.OUT)
+greenRed = Pin(14, Pin.OUT)
+
+# Configurações do Web Menu
+tallyName = "vMix Tally Lights"
+backColor = "red"  # CSS da página
+tallyCompany = "Smart Media"
+tallyDescriptions = "Igreja Mover 2024"
+
+# Configuração de IP e Rede
+tallyIp = '192.168.48.15'  # Endereço IP do Web Menu
+ssidTally_template = "vMix_Tally_Light_MOVER_%d"  # Template do SSID da Tally
+passwordTally = "vicksmedia"  # Senha da rede
+
+# Configurações iniciais
+statusOffTally = '0'
+ActiveTally = '1'
+previewTally = '2'
+currentState = -1
+port = 8099
+apEnabled = False
+deviceName = ''
+apPass = passwordTally
+
+# Definição das configurações iniciais
+settings = {
+    'ssid': 'Your Router SSID',
+    'pass': 'Your Router Password',
+    'hostName': 'Your Router IP Address',
+    'tallyNumber': 1
+}
+
+# Função para salvar configurações em arquivo
+def save_settings():
+    with open('settings.json', 'w') as f:
+        ujson.dump(settings, f)
+
+# Função para carregar configurações do arquivo
+def load_settings():
+    global settings
+    try:
+        with open('settings.json', 'r') as f:
+            settings = ujson.load(f)
+    except Exception as e:
+        print('Nenhuma configuração encontrada, usando padrão.')
+        save_settings()
+
+# Função para configurar os LEDs
+def ledSetOff():
+    ledSignal.off()
+    ledRed.off()
+    greenRed.off()
+
+def ledTallyActive():
+    ledSetOff()
+    ledRed.on()
+    ledSignal.on()
+
+def ledSetPreview():
+    ledSetOff()
+    greenRed.on()
+    ledSignal.on()
+
+def ledSetConnecting():
+    for _ in range(8):
+        ledSignal.on()
+        time.sleep(0.2)
+        ledSignal.off()
+        time.sleep(0.2)
+
+def ledSetSettings():
+    ledSetOff()
+    ledRed.on()
+    time.sleep(0.7)
+    ledRed.on()
+    time.sleep(0.4)
+
+def ledTallyOff():
+    print("Tally off")
+    ledSetOff()
+
+def SetledTallyActive():
+    print("Tally program")
+    ledSetOff()
+    ledTallyActive()
+
+def SetledTallyPreview():
+    print("Tally preview")
+    ledSetOff()
+    ledSetPreview()
+
+# Função para iniciar o ponto de acesso
+def apStart():
+    global apEnabled
+    ledSetSettings()
+    print("AP Start")
+    ap = network.WLAN(network.AP_IF)
+    ap.active(True)
+    ap.config(essid=deviceName, password=apPass)
+    ap.ifconfig([tallyIp, '255.255.255.0', tallyIp, '8.8.8.8'])
+    print('AP SSID:', deviceName)
+    print('AP password:', apPass)
+    print('IP address:', ap.ifconfig()[0])
+    apEnabled = True
+
+# Função para lidar com solicitações HTTP
+def http_server():
+    import usocket as socket
+
+    addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
+    s = socket.socket()
+    s.bind(addr)
+    s.listen(5)
+    print('Servidor HTTP iniciado em:', addr)
+
+    while True:
+        cl, addr = s.accept()
+        print('Cliente conectado de', addr)
+        cl_file = cl.makefile('rwb', 0)
+        request = cl_file.readline()
+        print('Requisição:', request)
+
+        while True:
+            line = cl_file.readline()
+            if not line or line == b'\r\n':
+                break
+
+        if b'POST /save' in request:
+            content_length = 0
+            while True:
+                header = cl_file.readline()
+                if b'Content-Length' in header:
+                    content_length = int(header.decode().split(':')[1].strip())
+                if header == b'\r\n':
+                    break
+            post_data = cl_file.read(content_length).decode()
+            params = {}
+            for param in post_data.split('&'):
+                key, value = param.split('=')
+                params[key] = value
+
+            # Atualiza as configurações com os novos valores
+            if 'ssid' in params:
+                settings['ssid'] = params['ssid']
+            if 'ssidpass' in params:
+                settings['pass'] = params['ssidpass']
+            if 'hostname' in params:
+                settings['hostName'] = params['hostname']
+            if 'inputnumber' in params:
+                tally_number = int(params['inputnumber'])
+                if 0 < tally_number <= 12:
+                    settings['tallyNumber'] = tally_number
+
+            save_settings()
+            cl.send('HTTP/1.0 302 Found\r\nLocation: /\r\n\r\n')
+            cl.close()
+            machine.reset()
+
+        else:
+            # Responde com a página de configuração
+            response = """<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <title>{deviceName}</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1, shrink-to-fit=no'>
+    <meta charset='utf-8'>
+    <style>
+        body {{
+            width: 100%;
+            height: 100%;
+            padding: 25px;
+            color: white;
+            background-color: {backColor};
+        }}
+        .title1 {{
+            display: flex;
+            flex-direction: column;
+            background: white;
+            color: #009eff;
+        }}
+        .wtitle1 {{
+            display: flex;
+            flex-direction: column;
+            background: white;
+            color: black;
+        }}
+        .title2 {{
+            display: flex;
+            flex-direction: column;
+            background: black;
+            color: yellow;
+        }}
+        .title3 {{
+            color: white;
+        }}
+        .title4 {{
+            background: white;
+            color: purple;
+        }}
+    </style>
+</head>
+<body>
+    <center>
+        <h1 class='title1'>{tallyCompany}</h1>
+        <h9 class='wtitle1'>{tallyName}</h9>
+        <h1 class='title2'>Tally Camera {tallyNumber}</h1>
+        <h2 class='title3'>SETTINGS</h2>
+        <form action='/save' method='post' enctype='multipart/form-data'>
+            SSID/Router: <input type='text' name='ssid' value='{ssid}'><br>
+            Password SSID/Router: <input type='text' name='ssidpass' value='{ssidpass}'><br>
+            vMix IP: <input type='text' name='hostname' value='{hostname}'><br>
+            Número (1-12): <input type='number' name='inputnumber' min='1' max='12' value='{tallyNumber}'><br>
+            <input type='submit' value='SALVAR'>
+        </form>
+        <h2 class='title3'>TALLY Info</h2>
+        <table>
+            <tr><th>IP</th><td>{ip}</td></tr>
+            <tr><th>MAC</th><td>{mac}</td></tr>
+            <tr><th>Sinal</th><td>{signal} dBm</td></tr>
+            <tr><th>Tally Number</th><td>{deviceName}</td></tr>
+            <tr><th>Status</th><td>{status}</td></tr>
+        </table>
+        <h4 class='title4'>{tallyDescriptions}</h4>
+    </center>
+</body>
+</html>
+"""
+            sta_if = network.WLAN(network.STA_IF)
+            ip = sta_if.ifconfig()[0] if sta_if.isconnected() else 'N/A'
+            mac = ubinascii.hexlify(network.WLAN().config('mac'), ':').decode()
+            signal = str(sta_if.status('rssi')) if sta_if.isconnected() else 'N/A'
+            status = 'Conectado' if sta_if.isconnected() else 'Desconectado'
+
+            html_response = response.format(
+                deviceName=deviceName,
+                backColor=backColor,
+                tallyCompany=tallyCompany,
+                tallyName=tallyName,
+                tallyNumber=settings['tallyNumber'],
+                ssid=settings['ssid'],
+                ssidpass=settings['pass'],
+                hostname=settings['hostName'],
+                ip=ip,
+                mac=mac,
+                signal=signal,
+                status=status,
+                tallyDescriptions=tallyDescriptions
+            )
+
+            cl.send('HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n')
+            cl.sendall(html_response)
+            cl.close()
+
+# Função para conectar ao WiFi
+def connectToWifi():
+    global apEnabled
+    print("Conectando ao WiFi")
+    print("SSID:", settings['ssid'])
+    print("Senha:", settings['pass'])
+
+    sta_if = network.WLAN(network.STA_IF)
+    sta_if.active(True)
+    sta_if.connect(settings['ssid'], settings['pass'])
+
+    timeout = 15
+    while not sta_if.isconnected() and timeout > 0:
+        time.sleep(1)
+        timeout -= 1
+        print("Tentando conectar...")
+
+    if sta_if.isconnected():
+        print("Conectado!")
+        print("IP address:", sta_if.ifconfig()[0])
+        print("Device name:", deviceName)
+    else:
+        print("Falha ao conectar ao WiFi")
+        apStart()
+
+# Função para conectar ao vMix
+def vMixConnect():
+    print("Conectando ao vMix em", settings['hostName'])
+    try:
+        addr_info = socket.getaddrinfo(settings['hostName'], port)
+        addr = addr_info[0][-1]
+        s = socket.socket()
+        s.connect(addr)
+        s.send(b"SUBSCRIBE TALLY\r\n")
+        print("Conectado ao vMix")
+        return s
+    except Exception as e:
+        print("Falha ao conectar ao vMix:", e)
+        return None
+
+# Função para lidar com dados recebidos do vMix
+def handleData(data):
+    global currentState
+    if data.startswith("TALLY"):
+        try:
+            newState = data[8 + settings['tallyNumber'] - 1]
+            if currentState != newState:
+                currentState = newState
+                if newState == '0':
+                    ledTallyOff()
+                elif newState == '1':
+                    SetledTallyActive()
+                elif newState == '2':
+                    SetledTallyPreview()
+                else:
+                    ledTallyOff()
+        except IndexError:
+            print("Dados de TALLY inválidos")
+    else:
+        print("Resposta do vMix:", data)
+
+# Função principal de inicialização
+def start():
+    global deviceName, apPass
+    ledSetConnecting()
+    load_settings()
+    deviceName = ssidTally_template % settings['tallyNumber']
+    apPass = passwordTally
+
+    connectToWifi()
+
+# Função de configuração inicial
+def setup():
+    ledSetOff()
+    start()
+
+# Loop principal
+def loop():
+    s = None
+    lastCheck = time.ticks_ms()
+    interval = 5000
+
+    if not apEnabled:
+        s = vMixConnect()
+
+    while True:
+        if s:
+            try:
+                data = s.recv(1024)
+                if data:
+                    handleData(data.decode())
+            except Exception as e:
+                print("Erro na conexão com o vMix:", e)
+                s.close()
+                s = None
+
+        if not s and not apEnabled and time.ticks_diff(time.ticks_ms(), lastCheck) > interval:
+            ledSetConnecting()
+            if s:
+                s.close()
+            s = vMixConnect()
+            lastCheck = time.ticks_ms()
+
+        if apEnabled:
+            http_server()
+            break
+
+        time.sleep(0.1)
+
+# Chamada inicial
+setup()
+loop()
